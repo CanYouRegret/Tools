@@ -1,0 +1,15 @@
+diff --git a/dalvik/src/main/java/dalvik/system/DexFile.java b/dalvik/src/main/java/dalvik/system/DexFile.java
+index f8e7f42..04bbad6 100644
+--- a/dalvik/src/main/java/dalvik/system/DexFile.java
++++ b/dalvik/src/main/java/dalvik/system/DexFile.java
+@@ -434,6 +434,10 @@ public final class DexFile {
+     private static native String[] getClassNameList(Object cookie);
+     private static native boolean isBackedByOatFile(Object cookie);
+     private static native void setTrusted(Object cookie);
++
++    //add
++    private static native void dumpMethodCode(Object m);
++    //add
+     /*
+      * Open a DEX file.  The value returned is a magic VM cookie.  On
+      * failure, an IOException is thrown.
