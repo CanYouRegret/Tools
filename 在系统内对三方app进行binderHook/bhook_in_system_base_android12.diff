@@ -1,0 +1,456 @@
+diff --git a/core/api/current.txt b/core/api/current.txt
+index cab4cc0c6391..8621b3df0ec9 100644
+--- a/core/api/current.txt
++++ b/core/api/current.txt
+@@ -19212,6 +19212,14 @@ package android.hardware.usb {
+ 
+ }
+ 
++package android.hook {
++
++  public class HookUtil {
++    method @Nullable public static Object getProxyContextObject(@Nullable Object);
++  }
++
++}
++
+ package android.inputmethodservice {
+ 
+   public abstract class AbstractInputMethodService extends android.app.Service implements android.view.KeyEvent.Callback {
+@@ -31711,6 +31719,7 @@ package android.os {
+     method public static final boolean isIsolated();
+     method public static final void killProcess(int);
+     method public static final int myPid();
++    method @NonNull public static String myProcessName();
+     method public static final int myTid();
+     method public static final int myUid();
+     method public static android.os.UserHandle myUserHandle();
+diff --git a/core/java/android/hook/CommonServiceBinderHook.java b/core/java/android/hook/CommonServiceBinderHook.java
+new file mode 100644
+index 000000000000..3fdb346faa38
+--- /dev/null
++++ b/core/java/android/hook/CommonServiceBinderHook.java
+@@ -0,0 +1,70 @@
++package android.hook;
++
++import android.annotation.NonNull;
++import android.annotation.Nullable;
++import android.annotation.SuppressLint;
++import android.os.IBinder;
++import android.os.IInterface;
++import android.os.IServiceManager;
++import android.text.TextUtils;
++import android.util.Log;
++
++import java.lang.reflect.InvocationHandler;
++import java.lang.reflect.Method;
++import java.io.BufferedReader;
++import java.io.FileReader;
++import java.io.IOException;
++import java.util.ArrayList;
++import java.util.Arrays;
++import java.util.List;
++
++/** @hide */
++public class CommonServiceBinderHook implements InvocationHandler {
++
++    private static final String TAG = "CommonServiceBinderHook";
++    private static final String HOOK_FILE = "/sdcard/hook/hooked_method.txt";
++    private Object target;
++
++    /** @hide */
++    public CommonServiceBinderHook(@Nullable Object target) {
++        this.target = target;
++    }
++
++    /** @hide */
++    public @Nullable Object invoke(@Nullable Object proxy, @Nullable Method method,
++		    @SuppressLint("ArrayReturn") @Nullable Object[] args) {
++        try {
++            Object result = method.invoke(target, args);
++	    String curProcessName = android.os.Process.myProcessName();
++	    if (Log.isLoggable(curProcessName + ".binderhook", Log.DEBUG)) {
++                List<String> needPrintStackTraceMethods = readMethodsFile(HOOK_FILE);
++	        if (needPrintStackTraceMethods != null && needPrintStackTraceMethods.contains(method.getName())) {
++	            Log.d(TAG, "invoke " + method.getName() + " args = " + Arrays.toString(args) + " result = " + result, new Throwable());
++	        } else {
++                    Log.d(TAG, "invoke " + method.getName() + " args = " + Arrays.toString(args) + " result = " + result);
++                }
++            }
++            return result;
++	} catch (Exception e) {
++	    e.printStackTrace();
++	    return null;
++	}
++    }
++
++    private static List<String> readMethodsFile(String path) {
++        List<String> methods = new ArrayList<>();
++        try {
++            FileReader fileReader = new FileReader(path);
++            BufferedReader reader = new BufferedReader(fileReader);
++            String line;
++            while ((line = reader.readLine()) != null) {
++                methods.add(line);
++            }
++            reader.close();
++        } catch (IOException e) {
++            Log.e(TAG, "Error reading " + path + " please check file permission in your app.");
++        }
++        return methods;
++    }
++}
++
+diff --git a/core/java/android/hook/CommonServiceBinderProxyHook.java b/core/java/android/hook/CommonServiceBinderProxyHook.java
+new file mode 100644
+index 000000000000..06419d477499
+--- /dev/null
++++ b/core/java/android/hook/CommonServiceBinderProxyHook.java
+@@ -0,0 +1,62 @@
++package android.hook;
++
++import android.annotation.NonNull;
++import android.annotation.Nullable;
++import android.annotation.SuppressLint;
++import android.os.IBinder;
++import android.os.IInterface;
++import android.os.IServiceManager;
++import android.text.TextUtils;
++import android.util.Log;
++
++import java.lang.reflect.InvocationHandler;
++import java.lang.reflect.Method;
++import java.lang.reflect.Proxy;
++import android.text.TextUtils;
++import java.util.Arrays;
++import android.util.Log;
++
++/** @hide */
++public class CommonServiceBinderProxyHook implements InvocationHandler {
++
++    private static final String TAG = "CommonServiceBinderProxyHook";
++    private Object target;
++
++    /** @hide */
++    public CommonServiceBinderProxyHook(@Nullable Object target) {
++        this.target = target;
++    }
++
++    /** @hide */
++    public @Nullable Object invoke(@Nullable Object proxy, @Nullable Method method,
++		    @SuppressLint("ArrayReturn") @Nullable Object[] args) {
++        try {
++            Object result = method.invoke(target, args);
++            Log.d(TAG, "invoke " + method.getName() + " args " + Arrays.toString(args) + " result = " + result);
++            if (TextUtils.equals(method.getName(), "queryLocalInterface")) {
++                if (result == null) {
++	            String aidlClassName = (String) args[0];
++		    if (!TextUtils.isEmpty(aidlClassName)) {
++		        Class aidlStubClass = Class.forName(aidlClassName + "$Stub");
++                        Method asInterfaceMethod = aidlStubClass.getDeclaredMethod("asInterface", IBinder.class);
++                        asInterfaceMethod.setAccessible(true);
++                        Object origIInterface = asInterfaceMethod.invoke(null, (IBinder)target);
++                        Log.d(TAG, "queryLocalInterface aidlClassName = " + aidlClassName + " origIInterface = " + origIInterface);
++                        if (origIInterface != null) {
++			    CommonServiceBinderHook csbHook = new CommonServiceBinderHook(origIInterface);
++			    return Proxy.newProxyInstance(
++                                origIInterface.getClass().getClassLoader(),
++                                origIInterface.getClass().getInterfaces(),
++                                csbHook);
++                        }
++		    }
++                }
++            }
++            return result;
++	} catch (Exception e) {
++	    e.printStackTrace();
++	    return null;
++	}
++    }
++}
++
+diff --git a/core/java/android/hook/HookUtil.java b/core/java/android/hook/HookUtil.java
+new file mode 100644
+index 000000000000..075b60437097
+--- /dev/null
++++ b/core/java/android/hook/HookUtil.java
+@@ -0,0 +1,41 @@
++package android.hook;
++
++import android.annotation.NonNull;
++import android.annotation.Nullable;
++import android.annotation.SuppressLint;
++import android.hook.ServiceManagerBinderProxyHook;
++import android.os.IBinder;
++import android.os.IInterface;
++import android.os.IServiceManager;
++import android.util.Log;
++
++import java.lang.reflect.Proxy;
++
++public class HookUtil {
++
++    private static final String TAG = "HookUtil";
++    private static final String HOOK_PROPERTY = "binderhook";
++
++    HookUtil(){}
++
++    public static @Nullable Object getProxyContextObject(@Nullable Object origContextObject) {
++        try {
++            if (android.os.Process.myUid() < android.os.Process.FIRST_APPLICATION_UID) {
++                return origContextObject;
++            }
++            if (Log.isLoggable(HOOK_PROPERTY, Log.DEBUG)) {
++                IBinder ibinder = (IBinder) origContextObject;
++                IInterface origIInterface = IServiceManager.Stub.asInterface(ibinder);
++                ServiceManagerBinderProxyHook proxy = new ServiceManagerBinderProxyHook(ibinder, origIInterface);
++                return Proxy.newProxyInstance(
++                    ibinder.getClass().getClassLoader(),
++                    ibinder.getClass().getInterfaces(),
++                    proxy);
++            }
++        } catch (Exception e) {
++            e.printStackTrace();
++        }
++        return origContextObject;
++    }
++
++}
+diff --git a/core/java/android/hook/ServiceManagerBinderHook.java b/core/java/android/hook/ServiceManagerBinderHook.java
+new file mode 100644
+index 000000000000..4aa7e74ee187
+--- /dev/null
++++ b/core/java/android/hook/ServiceManagerBinderHook.java
+@@ -0,0 +1,52 @@
++package android.hook;
++
++import android.annotation.NonNull;
++import android.annotation.Nullable;
++import android.annotation.SuppressLint;
++import android.os.IBinder;
++import android.os.IInterface;
++import android.os.IServiceManager;
++import android.text.TextUtils;
++import android.util.Log;
++
++import java.lang.reflect.InvocationHandler;
++import java.lang.reflect.Method;
++import java.lang.reflect.Proxy;
++import android.text.TextUtils;
++import java.util.Arrays;
++import android.util.Log;
++
++
++/** @hide */
++public class ServiceManagerBinderHook implements InvocationHandler {
++
++    private static final String TAG = "ServiceManagerBinderHook";
++    private Object target;
++
++    /** @hide */
++    public ServiceManagerBinderHook(@Nullable Object target) {
++        this.target = target;
++    }
++
++    /** @hide */
++    public @Nullable Object invoke(@Nullable Object proxy, @Nullable Method method,
++		    @SuppressLint("ArrayReturn") @Nullable Object[] args) {
++        try {
++            Object result = method.invoke(target, args);
++            Log.d(TAG, "invoke " + method.getName() + " args " + Arrays.toString(args) + " result = " + result);
++	    if (TextUtils.equals(method.getName(), "getService") || TextUtils.equals(method.getName(), "checkService")) {
++                //this return BinderProxy before Hook
++		CommonServiceBinderProxyHook csbpHook = new CommonServiceBinderProxyHook(result);
++                return Proxy.newProxyInstance(
++                        result.getClass().getClassLoader(),
++                        result.getClass().getInterfaces(),
++                        csbpHook);
++	    }
++            return result;
++	} catch (Exception e) {
++	    e.printStackTrace();
++	    return null;
++	}
++    }
++}
++
+diff --git a/core/java/android/hook/ServiceManagerBinderProxyHook.java b/core/java/android/hook/ServiceManagerBinderProxyHook.java
+new file mode 100644
+index 000000000000..ba5c7f520196
+--- /dev/null
++++ b/core/java/android/hook/ServiceManagerBinderProxyHook.java
+@@ -0,0 +1,54 @@
++package android.hook;
++
++import android.annotation.NonNull;
++import android.annotation.Nullable;
++import android.annotation.SuppressLint;
++import android.os.IBinder;
++import android.os.IInterface;
++import android.os.IServiceManager;
++import android.text.TextUtils;
++import android.util.Log;
++
++import java.lang.reflect.InvocationHandler;
++import java.lang.reflect.Method;
++import java.lang.reflect.Proxy;
++import android.text.TextUtils;
++import java.util.Arrays;
++import android.util.Log;
++
++/** @hide */
++public class ServiceManagerBinderProxyHook implements InvocationHandler {
++
++    private static final String TAG = "ServiceManagerBinderProxyHook";
++    private IBinder target;
++    private IInterface origIInterface;
++
++    /** @hide */
++    public ServiceManagerBinderProxyHook(@Nullable IBinder target, @Nullable IInterface origIInterface) {
++        this.target = target;
++        this.origIInterface = origIInterface;
++    }
++
++    /** @hide */
++    public @Nullable Object invoke(@Nullable Object proxy, @Nullable Method method,
++		    @SuppressLint("ArrayReturn") @Nullable Object[] args) {
++        try {
++            Object result = method.invoke(target, args);
++            Log.d(TAG, "invoke " + method.getName() + " args " + Arrays.toString(args) + " result = " + result);
++            if (TextUtils.equals(method.getName(), "queryLocalInterface")) {
++                if (result == null) {
++	            ServiceManagerBinderHook smbHook = new ServiceManagerBinderHook(origIInterface);
++	            return Proxy.newProxyInstance(
++                        origIInterface.getClass().getClassLoader(),
++                        origIInterface.getClass().getInterfaces(),
++                        smbHook);
++		}
++            }
++            return result;
++	} catch (Exception e) {
++	    e.printStackTrace();
++	    return null;
++	}
++    }
++}
++
+diff --git a/core/java/android/os/Process.java b/core/java/android/os/Process.java
+index 9f37c4877199..f56015a8d75d 100644
+--- a/core/java/android/os/Process.java
++++ b/core/java/android/os/Process.java
+@@ -605,6 +605,11 @@ public class Process {
+      */
+     public static final ZygoteProcess ZYGOTE_PROCESS = new ZygoteProcess();
+ 
++    /**
++     * The process name set via {@link #setArgV0(String)}.
++     */
++    private static String sArgV0;
++
+     /**
+      * Start a new process.
+      * 
+@@ -1130,13 +1135,29 @@ public class Process {
+     /**
+      * Change this process's argv[0] parameter.  This can be useful to show
+      * more descriptive information in things like the 'ps' command.
+-     * 
++     *
+      * @param text The new name of this process.
+-     * 
++     *
+      * {@hide}
+      */
+-    @UnsupportedAppUsage
+-    public static final native void setArgV0(String text);
++    public static void setArgV0(@NonNull String text) {
++        sArgV0 = text;
++        setArgV0Native(text);
++    }
++
++    private static native void setArgV0Native(String text);
++
++    /**
++     * Return the name of this process. By default, the process name is the same as the app's
++     * package name, but this can be changed using {@code android:process}.
++     */
++    @NonNull
++    public static String myProcessName() {
++        // Note this could be different from the actual process name if someone changes the
++        // process name using native code (using pthread_setname_np()). But sArgV0
++        // is the name that the system thinks this process has.
++        return sArgV0;
++    }
+ 
+     /**
+      * Kill the process with the given PID.
+diff --git a/core/jni/android_util_Binder.cpp b/core/jni/android_util_Binder.cpp
+index 793b4eba788c..6f0d4732f455 100644
+--- a/core/jni/android_util_Binder.cpp
++++ b/core/jni/android_util_Binder.cpp
+@@ -91,6 +91,12 @@ static struct binderinternal_offsets_t
+ 
+ } gBinderInternalOffsets;
+ 
++static struct hookutil_offsets_t
++{
++    jclass classObject;
++    jmethodID mGetProxyContextObject;
++} gHookUtilOffsets;
++
+ static struct sparseintarray_offsets_t
+ {
+     jclass classObject;
+@@ -787,6 +793,14 @@ jobject javaObjectForIBinder(JNIEnv* env, const sp<IBinder>& val)
+     return object;
+ }
+ 
++// If the argument is a JavaBBinder, return the Java object that was used to create it.
++// Otherwise return a BinderProxy for the IBinder. If a previous call was passed the
++// same IBinder, and the original BinderProxy is still alive, return the same BinderProxy.
++jobject javaObjectForIBinderUsedByGetContextObject(JNIEnv* env, const sp<IBinder>& val)
++{
++    return javaObjectForIBinder(env, val);
++}
++
+ sp<IBinder> ibinderForJavaObject(JNIEnv* env, jobject obj)
+ {
+     if (obj == NULL) return NULL;
+@@ -1136,7 +1150,11 @@ jint android_os_Debug_getDeathObjectCount(JNIEnv* env, jobject clazz)
+ static jobject android_os_BinderInternal_getContextObject(JNIEnv* env, jobject clazz)
+ {
+     sp<IBinder> b = ProcessState::self()->getContextObject(NULL);
+-    return javaObjectForIBinder(env, b);
++    jobject ibinder = javaObjectForIBinderUsedByGetContextObject(env, b);
++    if (gHookUtilOffsets.mGetProxyContextObject != nullptr) {
++        return env->CallStaticObjectMethod(gHookUtilOffsets.classObject, gHookUtilOffsets.mGetProxyContextObject, ibinder);
++    }
++    return ibinder;
+ }
+ 
+ static void android_os_BinderInternal_joinThreadPool(JNIEnv* env, jobject clazz)
+@@ -1237,6 +1255,11 @@ static int int_register_android_os_BinderInternal(JNIEnv* env)
+                                                            "<init>", "()V");
+     gSparseIntArrayOffsets.put = GetMethodIDOrDie(env, gSparseIntArrayOffsets.classObject, "put",
+                                                    "(II)V");
++    jclass HookUtilClass = FindClassOrDie(env, "android/hook/HookUtil");
++    gHookUtilOffsets.classObject = MakeGlobalRefOrDie(env, HookUtilClass);
++    gHookUtilOffsets.mGetProxyContextObject = GetStaticMethodIDOrDie(env, gHookUtilOffsets.classObject,
++		    "getProxyContextObject", "(Ljava/lang/Object;)Ljava/lang/Object;");
++
+ 
+     BpBinder::setLimitCallback(android_os_BinderInternal_proxyLimitcallback);
+ 
+diff --git a/core/jni/android_util_Process.cpp b/core/jni/android_util_Process.cpp
+index dd62bb1726c4..9807d195207e 100644
+--- a/core/jni/android_util_Process.cpp
++++ b/core/jni/android_util_Process.cpp
+@@ -1342,7 +1342,7 @@ static const JNINativeMethod methods[] = {
+         {"createProcessGroup", "(II)I", (void*)android_os_Process_createProcessGroup},
+         {"getExclusiveCores", "()[I", (void*)android_os_Process_getExclusiveCores},
+         {"setSwappiness", "(IZ)Z", (void*)android_os_Process_setSwappiness},
+-        {"setArgV0", "(Ljava/lang/String;)V", (void*)android_os_Process_setArgV0},
++        {"setArgV0Native", "(Ljava/lang/String;)V", (void*)android_os_Process_setArgV0},
+         {"setUid", "(I)I", (void*)android_os_Process_setUid},
+         {"setGid", "(I)I", (void*)android_os_Process_setGid},
+         {"sendSignal", "(II)V", (void*)android_os_Process_sendSignal},
