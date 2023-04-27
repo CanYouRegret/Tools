@@ -103,7 +103,7 @@ index 000000000000..3fdb346faa38
 +
 diff --git a/core/java/android/hook/CommonServiceBinderProxyHook.java b/core/java/android/hook/CommonServiceBinderProxyHook.java
 new file mode 100644
-index 000000000000..06419d477499
+index 000000000000..4187bae7c844
 --- /dev/null
 +++ b/core/java/android/hook/CommonServiceBinderProxyHook.java
 @@ -0,0 +1,62 @@
@@ -151,7 +151,7 @@ index 000000000000..06419d477499
 +                        asInterfaceMethod.setAccessible(true);
 +                        Object origIInterface = asInterfaceMethod.invoke(null, (IBinder)target);
 +                        Log.d(TAG, "queryLocalInterface aidlClassName = " + aidlClassName + " origIInterface = " + origIInterface);
-+                        if (origIInterface != null) {
++                        if (result == null && origIInterface != null) {
 +			    CommonServiceBinderHook csbHook = new CommonServiceBinderHook(origIInterface);
 +			    return Proxy.newProxyInstance(
 +                                origIInterface.getClass().getClassLoader(),
