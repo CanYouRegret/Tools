@@ -1,0 +1,266 @@
+diff --git a/core/java/android/app/ActivityThread.java b/core/java/android/app/ActivityThread.java
+index eecc0c79417f..4d2c2215cd7f 100644
+--- a/core/java/android/app/ActivityThread.java
++++ b/core/java/android/app/ActivityThread.java
+@@ -122,8 +122,10 @@ import android.os.PersistableBundle;
+ import android.os.Process;
+ import android.os.RemoteCallback;
+ import android.os.RemoteException;
++import android.os.ResultReceiver;
+ import android.os.ServiceManager;
+ import android.os.SharedMemory;
++import android.os.ShellCallback;
+ import android.os.StatsFrameworkInitializer;
+ import android.os.StatsServiceManager;
+ import android.os.StrictMode;
+@@ -1876,6 +1878,15 @@ public final class ActivityThread extends ClientTransactionHandler
+             args.arg6 = uiTranslationSpec;
+             sendMessage(H.UPDATE_UI_TRANSLATION_STATE, args);
+         }
++
++        @Override
++        public void onShellCommand(FileDescriptor in, FileDescriptor out,
++                FileDescriptor err, String[] args, ShellCallback callback,
++                ResultReceiver resultReceiver) {
++            //(new ActivityShellCommand(this, false)).exec(
++            //        this, in, out, err, args, callback, resultReceiver);
++        }
++
+     }
+ 
+     private @NonNull SafeCancellationTransport createSafeCancellationTransport(
+diff --git a/services/core/java/com/android/server/am/ActivityManagerService.java b/services/core/java/com/android/server/am/ActivityManagerService.java
+index 953e6e24236f..69a4acf81b02 100644
+--- a/services/core/java/com/android/server/am/ActivityManagerService.java
++++ b/services/core/java/com/android/server/am/ActivityManagerService.java
+@@ -8606,7 +8606,7 @@ public class ActivityManagerService extends IActivityManager.Stub
+     public void onShellCommand(FileDescriptor in, FileDescriptor out,
+             FileDescriptor err, String[] args, ShellCallback callback,
+             ResultReceiver resultReceiver) {
+-        (new ActivityManagerShellCommand(this, false)).exec(
++        (new ActivityManagerShellCommandEx(this, false)).exec(
+                 this, in, out, err, args, callback, resultReceiver);
+     }
+ 
+diff --git a/services/core/java/com/android/server/am/ActivityManagerShellCommand.java b/services/core/java/com/android/server/am/ActivityManagerShellCommand.java
+index 685d606f8d41..140708d458c6 100644
+--- a/services/core/java/com/android/server/am/ActivityManagerShellCommand.java
++++ b/services/core/java/com/android/server/am/ActivityManagerShellCommand.java
+@@ -127,7 +127,7 @@ import javax.microedition.khronos.egl.EGLContext;
+ import javax.microedition.khronos.egl.EGLDisplay;
+ import javax.microedition.khronos.egl.EGLSurface;
+ 
+-final class ActivityManagerShellCommand extends ShellCommand {
++class ActivityManagerShellCommand extends ShellCommand {
+     public static final String NO_CLASS_ERROR_CODE = "Error type 3";
+ 
+     private static final String SHELL_PACKAGE_NAME = "com.android.shell";
+diff --git a/services/core/java/com/android/server/am/ActivityManagerShellCommandEx.java b/services/core/java/com/android/server/am/ActivityManagerShellCommandEx.java
+new file mode 100644
+index 000000000000..de021f44b653
+--- /dev/null
++++ b/services/core/java/com/android/server/am/ActivityManagerShellCommandEx.java
+@@ -0,0 +1,203 @@
++package com.android.server.am;
++
++import android.os.RemoteException;
++import android.text.TextUtils;
++import android.util.ArrayMap;
++import android.util.Log;
++
++import java.io.PrintWriter;
++import java.lang.reflect.Field;
++import java.lang.reflect.Method;
++import java.lang.reflect.Modifier;
++import java.util.Set;
++
++final class ActivityManagerShellCommandEx extends ActivityManagerShellCommand {
++
++    private static final String TAG = "ActivityManagerShellCommandEx";
++    private static ArrayMap<String, Boolean> mDebugLogSwitchCacheMap = new ArrayMap<String, Boolean>();
++
++    static {
++        debugLogSwitchInitializeLocked();
++    }
++
++    ActivityManagerShellCommandEx(ActivityManagerService service, boolean dumping) {
++        super(service, dumping);
++    }
++
++    private static void debugLogSwitchInitializeLocked() {
++        synchronized(mDebugLogSwitchCacheMap) {
++	    if (mDebugLogSwitchCacheMap.size() <= 0) {
++		try {
++                    Class targetClass = ActivityManagerDebugConfig.class;
++                    Field[] fields = targetClass.getDeclaredFields();
++		    for (Field field : fields) {
++		        if (field.getName().startsWith("DEBUG_")) {
++			    mDebugLogSwitchCacheMap.put(field.getName(), (Boolean) getStaticFinalField(targetClass, field.getName()));
++			}
++		    }
++		} catch (Exception e) {
++		    e.printStackTrace();
++		}
++	    }
++	}
++    }
++
++    @Override
++    public int onCommand(String cmd) {
++        if (cmd == null) {
++            return handleDefaultCommands(cmd);
++        }
++        final PrintWriter pw = getOutPrintWriter();
++        try {
++            switch (cmd) {
++		case "log-switch":
++		    return runLogSwitch(pw);
++                default:
++                    return handleDefaultCommands(cmd);
++            }
++        } catch (Exception e) {
++            pw.println("exception: " + e);
++        }
++        return -1;
++    }
++
++    private int runLogSwitch(PrintWriter pw) {
++	String opt = getNextOption();
++        String logSwitchNames = getNextArgRequired();
++        if ("--enable".equals(opt)) {
++	    return changeLogSwitchsLocked(pw, logSwitchNames, true);
++	} else if ("--disable".equals(opt)) {
++            return changeLogSwitchsLocked(pw, logSwitchNames, false);
++	} else if (("--dump").equals(opt)) {
++            return dumpLogSwitchStateLocked(pw, logSwitchNames);
++	} else {
++	    pw.println("Error: unknown command.");
++	}
++        return 1;
++    }
++
++    private int dumpLogSwitchStateLocked(PrintWriter pw, String logSwitchNames) {
++        if (logSwitchNames == null || TextUtils.isEmpty(logSwitchNames)) {
++            pw.println("Error: please input the log swith name.");
++            return -1;
++        }
++	synchronized(mDebugLogSwitchCacheMap) {
++            if ("all".equals(logSwitchNames)) {
++	        Set<String> keySet = mDebugLogSwitchCacheMap.keySet();
++		for (String s : keySet) {
++		    pw.println(s + " : " + mDebugLogSwitchCacheMap.get(s));
++		}
++	    } else {
++                String[] switchNames = logSwitchNames.split(",");
++                int length = switchNames.length;
++                for (int i = 0; i < length; i++) {
++                    if (!mDebugLogSwitchCacheMap.keySet().contains(switchNames[i])) {
++                        pw.println("Warning: Debug log switch not exist, please check: " + switchNames[i]);
++                        continue;
++                    } else {
++		        pw.println(switchNames[i] + " : " + mDebugLogSwitchCacheMap.get(switchNames[i]));
++		    }
++                }
++	    }
++	}
++	return 1;
++    }
++
++    private int changeLogSwitchsLocked(PrintWriter pw, String logSwitchNames, boolean enable) {
++        if (logSwitchNames == null || TextUtils.isEmpty(logSwitchNames)) {
++            pw.println("Error: please input the log swith name.");
++            return -1;
++        }
++        String[] switchNames = logSwitchNames.split(",");
++        int length = switchNames.length;
++        for (int i = 0; i < length; i++) {
++            synchronized(mDebugLogSwitchCacheMap) {
++	        if (!mDebugLogSwitchCacheMap.keySet().contains(switchNames[i])) {
++		    pw.println("Warning: Debug log switch not exist, please check: " + switchNames[i]);
++	            continue;
++		}
++		if (mDebugLogSwitchCacheMap.get(switchNames[i]) == enable) {
++		    pw.println("Warning: Debug log switch already in " + enable + " state, not need set: " + switchNames[i]);
++		} else {
++		    mDebugLogSwitchCacheMap.put(switchNames[i], enable);
++		}
++	    }
++        }
++	updateLogSwitchsStateLocked(pw);
++	return 1;
++    }
++
++    private void updateLogSwitchsStateLocked(PrintWriter pw) {
++        synchronized(mDebugLogSwitchCacheMap) {
++	    Class targetClass = ActivityManagerDebugConfig.class;
++	    Set<String> keySet = mDebugLogSwitchCacheMap.keySet();
++	    try {
++	        for (String string : keySet) {
++	            if ((boolean)getStaticFinalField(targetClass, string) | (boolean)mDebugLogSwitchCacheMap.get(string)) {
++		        setStaticFinalField(targetClass, string, mDebugLogSwitchCacheMap.get(string));
++			pw.println("Success Debug log switch: " + string + " set to " + mDebugLogSwitchCacheMap.get(string));
++		    }
++	        }
++	    } catch (Exception e) {
++	        e.printStackTrace();
++	    }
++	}
++    }
++
++    public static <T> T getStaticFinalField(Class<?> clazz, String fieldName) throws NoSuchFieldException, IllegalAccessException {
++        Field field = clazz.getDeclaredField(fieldName);
++        field.setAccessible(true);
++        int modifiers = field.getModifiers();
++        if (Modifier.isFinal(modifiers) && Modifier.isStatic(modifiers)) {
++            Field modifiersField = Field.class.getDeclaredField("accessFlags");
++            modifiersField.setAccessible(true);
++            int accessFlags = modifiersField.getInt(field);
++            modifiersField.setInt(field, accessFlags & ~Modifier.FINAL);
++        }
++        Object result = field.get(null);
++        // 重新将访问标记设置为 private static
++        if (Modifier.isPrivate(modifiers)) {
++            Field modifiersField = Field.class.getDeclaredField("accessFlags");
++            modifiersField.setAccessible(true);
++            int accessFlags = modifiersField.getInt(field);
++            modifiersField.setInt(field, (accessFlags & ~Modifier.PRIVATE) | Modifier.STATIC);
++        } else if (!Modifier.isStatic(modifiers)) {
++            Field modifiersField = Field.class.getDeclaredField("accessFlags");
++            modifiersField.setAccessible(true);
++            int accessFlags = modifiersField.getInt(field);
++            modifiersField.setInt(field, (accessFlags & ~Modifier.FINAL) | Modifier.STATIC);
++        }
++        return (T) result;
++    }
++
++    public static void setStaticFinalField(Class<?> clazz, String fieldName, Object newValue) throws NoSuchFieldException, IllegalAccessException {
++        Field field = clazz.getDeclaredField(fieldName);
++        field.setAccessible(true);
++        int modifiers = field.getModifiers();
++        if (Modifier.isFinal(modifiers) && Modifier.isStatic(modifiers)) {
++            Field modifiersField = Field.class.getDeclaredField("accessFlags");
++            modifiersField.setAccessible(true);
++            int accessFlags = modifiersField.getInt(field);
++            modifiersField.setInt(field, accessFlags & ~Modifier.FINAL);
++        }
++        field.set(null, newValue);
++        // 重新将访问标记设置为 private static final
++        if (Modifier.isPrivate(modifiers)) {
++            Field modifiersField = Field.class.getDeclaredField("accessFlags");
++            modifiersField.setAccessible(true);
++            int accessFlags = modifiersField.getInt(field);
++            modifiersField.setInt(field, (accessFlags & ~Modifier.PRIVATE) | Modifier.STATIC | Modifier.FINAL);
++        } else if (!Modifier.isStatic(modifiers)) {
++            Field modifiersField = Field.class.getDeclaredField("accessFlags");
++            modifiersField.setAccessible(true);
++            int accessFlags = modifiersField.getInt(field);
++            modifiersField.setInt(field, (accessFlags & ~Modifier.FINAL) | Modifier.STATIC);
++        } else if (!Modifier.isFinal(modifiers)) {
++            Field modifiersField = Field.class.getDeclaredField("accessFlags");
++            modifiersField.setAccessible(true);
++            int accessFlags = modifiersField.getInt(field);
++            modifiersField.setInt(field, (accessFlags & ~Modifier.STATIC) | Modifier.FINAL);
++        }
++    }
++
++}
